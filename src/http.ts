@@ -165,6 +165,23 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
     });
   }
 
+  // Hardening: /setup* can replace the pCloud token, so require the connector
+  // password via HTTP Basic auth (any username).
+  app.use("/setup", (req, res, next) => {
+    const header = req.header("authorization") || "";
+    let password = "";
+    if (header.toLowerCase().startsWith("basic ")) {
+      const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
+      password = decoded.slice(decoded.indexOf(":") + 1);
+    }
+    if (!password || !bearerEqual(password, config.connectorPassword)) {
+      res.setHeader("WWW-Authenticate", 'Basic realm="pcloud-mcp setup"');
+      res.status(401).send("Authentication required");
+      return;
+    }
+    next();
+  });
+
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
   });
@@ -176,7 +193,7 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
       homePage({
         publicUrl: config.publicUrl,
         pcloudConnected: Boolean(creds?.access_token),
-        pcloudEmail: creds?.email,
+        pcloudEmail: undefined,
         pcloudHost: creds?.hostname,
         authMode: config.authMode
       })

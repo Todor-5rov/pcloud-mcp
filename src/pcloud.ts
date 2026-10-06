@@ -175,8 +175,13 @@ export async function probeHostname(
   };
 }
 
+const PCLOUD_HOSTS = new Set(["api.pcloud.com", "eapi.pcloud.com"]);
+
 export function hostnameFromLocation(locationid?: string | number, hostname?: string): string {
-  if (hostname) return hostname.replace(/^https?:\/\//, "");
+  // Hardening: never send client_secret to a host taken from the query string
+  // unless it is an official pCloud API host.
+  const cleaned = (hostname || "").replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
+  if (PCLOUD_HOSTS.has(cleaned)) return cleaned;
   if (String(locationid) === "2") return "eapi.pcloud.com";
   return "api.pcloud.com";
 }
