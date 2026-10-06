@@ -109,14 +109,14 @@ export class FileOAuthProvider implements OAuthServerProvider {
           client_id_issued_at: incoming.client_id_issued_at ?? Math.floor(Date.now() / 1000)
         };
         self.data.clients[full.client_id] = full;
-        self.persist();
+        await self.persist();
         return full;
       }
     };
   }
 
   private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return;
+    // Always reload: on serverless, several instances may share one store.
     this.data = await loadJson<OAuthDisk>(this.path, {
       clients: {},
       codes: {},
@@ -127,9 +127,9 @@ export class FileOAuthProvider implements OAuthServerProvider {
     this.loaded = true;
   }
 
-  private persist(): void {
+  private async persist(): Promise<void> {
     prune(this.data);
-    saveJson(this.path, this.data);
+    await saveJson(this.path, this.data);
   }
 
   async authorize(
@@ -150,7 +150,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
       },
       expiresAt: now() + CODE_TTL_MS
     };
-    this.persist();
+    await this.persist();
     res.redirect(`/oauth/consent?pending=${encodeURIComponent(pendingId)}`);
   }
 
@@ -229,7 +229,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
         delete this.data.tokens[id];
       }
     }
-    this.persist();
+    await this.persist();
   }
 
   async renderConsent(req: Request, res: Response): Promise<void> {
@@ -288,7 +288,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
       expiresAt: now() + CODE_TTL_MS
     };
     delete this.data.pending[pendingId];
-    this.persist();
+    await this.persist();
 
     const redirect = new URL(pending.params.redirectUri);
     redirect.searchParams.set("code", code);
@@ -296,11 +296,11 @@ export class FileOAuthProvider implements OAuthServerProvider {
     res.redirect(redirect.toString());
   }
 
-  private issueTokens(
+  private async issueTokens(
     clientId: string,
     scopes: string[],
     resource?: string
-  ): OAuthTokens {
+  ): Promise<OAuthTokens> {
     const accessToken = randomBytes(32).toString("base64url");
     const refreshToken = randomBytes(32).toString("base64url");
     const id = randomUUID();
@@ -313,7 +313,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
       accessExpiresAt: now() + ACCESS_TTL_SEC * 1000,
       refreshExpiresAt: now() + REFRESH_TTL_MS
     };
-    this.persist();
+    await this.persist();
     return {
       access_token: accessToken,
       token_type: "bearer",

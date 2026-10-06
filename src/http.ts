@@ -75,7 +75,7 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
     const fingerprint = candidates.map((c) => `${c.hostname}:${c.access_token}`).join("|");
     if (cached?.fingerprint === fingerprint) return cached.client;
     const resolved = await resolveWorkingClient(candidates);
-    saveJson(pcloudCredsPath(config.dataDir), resolved.creds);
+    await saveJson(pcloudCredsPath(config.dataDir), resolved.creds);
     cached = { fingerprint, ...resolved };
     return resolved.client;
   };
@@ -225,7 +225,7 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
         uid: Number(probed.userinfo.userid || 0) || undefined,
         email: String(probed.userinfo.email || "") || undefined
       };
-      saveJson(pcloudCredsPath(config.dataDir), creds);
+      await saveJson(pcloudCredsPath(config.dataDir), creds);
       cached = undefined;
       res.type("html").send(
         setupPage({
@@ -282,7 +282,7 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
           String(req.query.hostname || "")
         )
       });
-      saveJson(pcloudCredsPath(config.dataDir), creds);
+      await saveJson(pcloudCredsPath(config.dataDir), creds);
       cached = undefined;
       res.type("html").send(
         setupPage({
