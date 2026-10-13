@@ -254,7 +254,7 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
     url.searchParams.set("client_id", config.pcloudClientId);
     url.searchParams.set("response_type", "code");
     url.searchParams.set("redirect_uri", `${config.publicUrl}/setup/callback`);
-    res.redirect(url.toString());
+    res.redirect(303, url.toString());
   });
 
   app.get("/setup/callback", async (req, res) => {

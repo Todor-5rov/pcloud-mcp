@@ -151,7 +151,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
       expiresAt: now() + CODE_TTL_MS
     };
     await this.persist();
-    res.redirect(`/oauth/consent?pending=${encodeURIComponent(pendingId)}`);
+    res.redirect(303, `/oauth/consent?pending=${encodeURIComponent(pendingId)}`);
   }
 
   async challengeForAuthorizationCode(
@@ -293,7 +293,9 @@ export class FileOAuthProvider implements OAuthServerProvider {
     const redirect = new URL(pending.params.redirectUri);
     redirect.searchParams.set("code", code);
     if (pending.params.state) redirect.searchParams.set("state", pending.params.state);
-    res.redirect(redirect.toString());
+    // Explicit 303: Vercel's res.redirect defaults to 307, which makes the
+    // browser re-POST this form to the client's callback (405 at Claude).
+    res.redirect(303, redirect.toString());
   }
 
   private async issueTokens(
