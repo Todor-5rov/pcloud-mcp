@@ -52,7 +52,18 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
 
   const issuerUrl = new URL(config.publicUrl);
   const mcpUrl = new URL("/mcp", `${config.publicUrl}/`);
-  const oauth = createOAuthProvider(config.dataDir, config.connectorPassword);
+  const perUser = config.pcloudLogin === "per-user";
+  const oauth = createOAuthProvider(
+    config.dataDir,
+    config.connectorPassword,
+    perUser
+      ? {
+          clientId: config.pcloudClientId!,
+          clientSecret: config.pcloudClientSecret!,
+          redirectUri: `${config.publicUrl}/setup/callback`
+        }
+      : undefined
+  );
 
   let cached: { fingerprint: string; creds: PCloudCreds; client: PCloudClient } | undefined;
 
@@ -81,7 +92,16 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
   };
 
   const handleMcp = async (req: Request, res: Response) => {
-    const server = createPCloudMcpServer(getClient, config.readFileMaxBytes);
+    // Per-user mode: only the pCloud account bound to this caller's token,
+    // never the shared one from /setup.
+    const own = (req as Request & { auth?: AuthInfo }).auth?.extra?.pcloud as PCloudCreds | undefined;
+    const clientFor = perUser
+      ? async () => {
+          if (!own) throw new Error("Sign in with pCloud again.");
+          return new PCloudClient(own.access_token, own.hostname);
+        }
+      : getClient;
+    const server = createPCloudMcpServer(clientFor, config.readFileMaxBytes);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true
@@ -164,6 +184,16 @@ export async function createHttpApp(config: AppConfig): Promise<express.Express>
       void handleMcp(req, res);
     });
   }
+
+  // pCloud returns per-user connector sign-ins to the same registered redirect
+  // URI as /setup; those carry the pending sign-in id as `state`.
+  app.get("/setup/callback", async (req, res, next) => {
+    if (!(await oauth.isPendingLogin(String(req.query.state || "")))) {
+      next();
+      return;
+    }
+    await oauth.completePCloudLogin(req, res);
+  });
 
   // Hardening: /setup* can replace the pCloud token, so require the connector
   // password via HTTP Basic auth (any username).

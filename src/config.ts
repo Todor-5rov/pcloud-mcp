@@ -64,6 +64,8 @@ export interface AppConfig {
   pcloudApiHost: string;
   pcloudClientId: string | undefined;
   pcloudClientSecret: string | undefined;
+  /** "per-user": everyone signs in with their own pCloud account when connecting. */
+  pcloudLogin: "shared" | "per-user";
   readFileMaxBytes: number;
 }
 
@@ -84,6 +86,17 @@ export function loadConfig(): AppConfig {
   if (process.env.VERCEL && !process.env.CONNECTOR_PASSWORD) {
     throw new Error("Set CONNECTOR_PASSWORD in the Vercel project environment.");
   }
+  const pcloudLogin = (process.env.PCLOUD_LOGIN || "shared").toLowerCase();
+  if (pcloudLogin !== "shared" && pcloudLogin !== "per-user") {
+    throw new Error(`Invalid PCLOUD_LOGIN: ${pcloudLogin}. Use shared or per-user.`);
+  }
+  if (
+    pcloudLogin === "per-user" &&
+    (authMode !== "oauth" || !process.env.PCLOUD_CLIENT_ID || !process.env.PCLOUD_CLIENT_SECRET)
+  ) {
+    throw new Error("PCLOUD_LOGIN=per-user needs AUTH_MODE=oauth and PCLOUD_CLIENT_ID / PCLOUD_CLIENT_SECRET.");
+  }
+
   const connectorPassword =
     process.env.CONNECTOR_PASSWORD ||
     readOrCreateSecret(join(dataDir, "connector-password.txt"));
@@ -102,6 +115,7 @@ export function loadConfig(): AppConfig {
     ),
     pcloudClientId: process.env.PCLOUD_CLIENT_ID || undefined,
     pcloudClientSecret: process.env.PCLOUD_CLIENT_SECRET || undefined,
+    pcloudLogin,
     readFileMaxBytes: Number(process.env.READ_FILE_MAX_BYTES || 1_000_000)
   };
 }

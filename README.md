@@ -179,6 +179,16 @@ export PCLOUD_API_HOST=eapi.pcloud.com   # if EU
 grok mcp add pcloud -- node /path/to/pcloud-mcp/dist/index.js --stdio
 ```
 
+## One pCloud account per person
+
+By default everyone who connects shares the one pCloud account linked at
+`/setup`. Set `PCLOUD_LOGIN=per-user` (with `AUTH_MODE=oauth` and
+`PCLOUD_CLIENT_ID` / `PCLOUD_CLIENT_SECRET`) and each person instead signs in
+to their own pCloud account when they add the connector; their tools only
+ever see that account. pCloud redirects back to the same
+`https://YOUR_HOST/setup/callback` URI, so nothing changes in pCloud My Apps.
+Connections made before the switch are asked to sign in again.
+
 ## Auth modes
 
 - **`oauth` (default, use this for Grok / Grokbot iOS)** — unauthenticated `/mcp` returns `401` plus OAuth metadata. Clients register themselves and you approve with the connector password.

@@ -14,7 +14,8 @@ import type {
   OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { consentPage } from "./pages.js";
-import { loadJson, oauthStorePath, saveJson } from "./store.js";
+import { exchangePCloudCode, hostnameFromLocation } from "./pcloud.js";
+import { loadJson, oauthStorePath, saveJson, type PCloudCreds } from "./store.js";
 
 const ACCESS_TTL_SEC = 7 * 24 * 60 * 60;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -26,6 +27,7 @@ interface StoredCode {
   codeChallenge: string;
   scopes: string[];
   resource?: string;
+  pcloud?: PCloudCreds;
   expiresAt: number;
 }
 
@@ -37,6 +39,15 @@ interface StoredToken {
   refreshToken: string;
   accessExpiresAt: number;
   refreshExpiresAt: number;
+  pcloud?: PCloudCreds;
+}
+
+// Per-user mode: each person signs in to their own pCloud account during the
+// connector's OAuth flow, and their token is bound to the MCP tokens issued.
+export interface PCloudLogin {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
 }
 
 interface PendingAuth {
@@ -92,7 +103,8 @@ export class FileOAuthProvider implements OAuthServerProvider {
 
   constructor(
     private readonly path: string,
-    private readonly connectorPassword: string
+    private readonly connectorPassword: string,
+    private readonly pcloudLogin?: PCloudLogin
   ) {
     const self = this;
     this.clientsStore = {
@@ -151,7 +163,65 @@ export class FileOAuthProvider implements OAuthServerProvider {
       expiresAt: now() + CODE_TTL_MS
     };
     await this.persist();
+    if (this.pcloudLogin) {
+      const url = new URL("https://my.pcloud.com/oauth2/authorize");
+      url.searchParams.set("client_id", this.pcloudLogin.clientId);
+      url.searchParams.set("response_type", "code");
+      url.searchParams.set("redirect_uri", this.pcloudLogin.redirectUri);
+      url.searchParams.set("state", pendingId);
+      res.redirect(303, url.toString());
+      return;
+    }
     res.redirect(303, `/oauth/consent?pending=${encodeURIComponent(pendingId)}`);
+  }
+
+  /** True when `state` from a pCloud redirect belongs to a pending connector sign-in. */
+  async isPendingLogin(state: string): Promise<boolean> {
+    if (!this.pcloudLogin || !state) return false;
+    await this.ensureLoaded();
+    return Boolean(this.data.pending[state]);
+  }
+
+  /** pCloud redirected back with a code: bind that account to a new MCP code. */
+  async completePCloudLogin(req: Request, res: Response): Promise<void> {
+    await this.ensureLoaded();
+    const pendingId = String(req.query.state || "");
+    const pending = this.data.pending[pendingId];
+    const code = String(req.query.code || "");
+    if (!this.pcloudLogin || !pending || pending.expiresAt < now() || !code) {
+      res.status(400).send(
+        consentPage({
+          pendingId: "",
+          clientName: "Unknown client",
+          error: "This sign-in expired or pCloud did not return a code. Start connecting again."
+        })
+      );
+      return;
+    }
+    let pcloud: PCloudCreds;
+    try {
+      pcloud = await exchangePCloudCode({
+        clientId: this.pcloudLogin.clientId,
+        clientSecret: this.pcloudLogin.clientSecret,
+        code,
+        hostname: hostnameFromLocation(
+          String(req.query.locationid || ""),
+          String(req.query.hostname || "")
+        )
+      });
+    } catch (error) {
+      res.status(400).send(
+        consentPage({
+          pendingId: "",
+          clientName: pending.client.client_name || pending.client.client_id,
+          error: `pCloud sign-in failed: ${error instanceof Error ? error.message : "unknown error"}`
+        })
+      );
+      return;
+    }
+    const redirect = this.finishAuthorization(pendingId, pending, pcloud);
+    await this.persist();
+    res.redirect(303, redirect);
   }
 
   async challengeForAuthorizationCode(
@@ -181,7 +251,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
       throw new Error("redirect_uri mismatch");
     }
     delete this.data.codes[authorizationCode];
-    return this.issueTokens(client.client_id, code.scopes, code.resource);
+    return this.issueTokens(client.client_id, code.scopes, code.resource, code.pcloud);
   }
 
   async exchangeRefreshToken(
@@ -200,7 +270,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
       if (token.refreshToken === refreshToken) delete this.data.tokens[id];
     }
     const nextScopes = scopes?.length ? scopes : existing.scopes;
-    return this.issueTokens(client.client_id, nextScopes, existing.resource);
+    return this.issueTokens(client.client_id, nextScopes, existing.resource, existing.pcloud);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -209,12 +279,18 @@ export class FileOAuthProvider implements OAuthServerProvider {
     if (!found || found.accessExpiresAt < now()) {
       throw new Error("Invalid or expired token");
     }
+    // Tokens from the shared-password flow carry no pCloud account; in
+    // per-user mode reject them so the client signs in again with pCloud.
+    if (this.pcloudLogin && !found.pcloud) {
+      throw new Error("Sign in with pCloud again");
+    }
     return {
       token,
       clientId: found.clientId,
       scopes: found.scopes,
       expiresAt: Math.floor(found.accessExpiresAt / 1000),
-      resource: found.resource ? new URL(found.resource) : undefined
+      resource: found.resource ? new URL(found.resource) : undefined,
+      extra: found.pcloud ? { pcloud: found.pcloud } : undefined
     };
   }
 
@@ -267,7 +343,7 @@ export class FileOAuthProvider implements OAuthServerProvider {
       );
       return;
     }
-    if (!safeEqual(password, this.connectorPassword)) {
+    if (this.pcloudLogin || !safeEqual(password, this.connectorPassword)) {
       res.status(401).send(
         consentPage({
           pendingId,
@@ -278,6 +354,19 @@ export class FileOAuthProvider implements OAuthServerProvider {
       return;
     }
 
+    const redirect = this.finishAuthorization(pendingId, pending);
+    await this.persist();
+    // Explicit 303: Vercel's res.redirect defaults to 307, which makes the
+    // browser re-POST this form to the client's callback (405 at Claude).
+    res.redirect(303, redirect);
+  }
+
+  /** Issues the authorization code and returns the client's callback URL. */
+  private finishAuthorization(
+    pendingId: string,
+    pending: PendingAuth,
+    pcloud?: PCloudCreds
+  ): string {
     const code = randomBytes(24).toString("base64url");
     this.data.codes[code] = {
       clientId: pending.client.client_id,
@@ -285,23 +374,21 @@ export class FileOAuthProvider implements OAuthServerProvider {
       codeChallenge: pending.params.codeChallenge,
       scopes: pending.params.scopes?.length ? pending.params.scopes : ["mcp:tools"],
       resource: pending.params.resource,
+      pcloud,
       expiresAt: now() + CODE_TTL_MS
     };
     delete this.data.pending[pendingId];
-    await this.persist();
-
     const redirect = new URL(pending.params.redirectUri);
     redirect.searchParams.set("code", code);
     if (pending.params.state) redirect.searchParams.set("state", pending.params.state);
-    // Explicit 303: Vercel's res.redirect defaults to 307, which makes the
-    // browser re-POST this form to the client's callback (405 at Claude).
-    res.redirect(303, redirect.toString());
+    return redirect.toString();
   }
 
   private async issueTokens(
     clientId: string,
     scopes: string[],
-    resource?: string
+    resource?: string,
+    pcloud?: PCloudCreds
   ): Promise<OAuthTokens> {
     const accessToken = randomBytes(32).toString("base64url");
     const refreshToken = randomBytes(32).toString("base64url");
@@ -313,7 +400,8 @@ export class FileOAuthProvider implements OAuthServerProvider {
       accessToken,
       refreshToken,
       accessExpiresAt: now() + ACCESS_TTL_SEC * 1000,
-      refreshExpiresAt: now() + REFRESH_TTL_MS
+      refreshExpiresAt: now() + REFRESH_TTL_MS,
+      pcloud
     };
     await this.persist();
     return {
@@ -326,6 +414,10 @@ export class FileOAuthProvider implements OAuthServerProvider {
   }
 }
 
-export function createOAuthProvider(dataDir: string, connectorPassword: string): FileOAuthProvider {
-  return new FileOAuthProvider(oauthStorePath(dataDir), connectorPassword);
+export function createOAuthProvider(
+  dataDir: string,
+  connectorPassword: string,
+  pcloudLogin?: PCloudLogin
+): FileOAuthProvider {
+  return new FileOAuthProvider(oauthStorePath(dataDir), connectorPassword, pcloudLogin);
 }
