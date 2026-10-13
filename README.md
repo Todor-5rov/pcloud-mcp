@@ -8,7 +8,7 @@ A hostable [Model Context Protocol](https://modelcontextprotocol.io) server for 
 
 | Tool | Purpose |
 | --- | --- |
-| `list_folder` | List a folder (root is `folderid` `0` or path `/`) |
+| `list_folder` | List a folder (root is `folderid` `0` or path `/`); accepted folders shared with you are included, marked `shared_with_me` |
 | `get_metadata` | File or folder metadata |
 | `read_file` | Read text inline; binary files get a temporary download URL |
 | `write_file` | Upload UTF-8 or base64 content |
@@ -17,8 +17,10 @@ A hostable [Model Context Protocol](https://modelcontextprotocol.io) server for 
 | `delete_file` / `delete_folder` | Trash a file or folder |
 | `rename` / `move` | Rename in place or move by destination path |
 | `copy_file` / `copy_folder` | Copy into another folder |
-| `search` | Name search under a folder tree |
+| `search` | Name search under a folder tree, including shared folders |
 | `create_public_link` / `list_public_links` / `delete_public_link` | Public share links |
+| `list_shares` / `accept_share` | Folder share invitations received and sent; accept a pending one |
+| `read_public_link` | Open a pCloud public link someone sent you (folder listing or file contents) |
 | `get_account` | Email, quota, used space |
 | `list_trash` / `restore_trash` | Trash |
 

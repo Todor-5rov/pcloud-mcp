@@ -55,6 +55,29 @@ function looksText(contentType: string | undefined, name: string): boolean {
   );
 }
 
+function findInTree(node: JsonMap, fileid: number): JsonMap | undefined {
+  for (const entry of (Array.isArray(node.contents) ? node.contents : []) as JsonMap[]) {
+    if (!entry.isfolder && Number(entry.fileid) === fileid) return entry;
+    if (entry.isfolder) {
+      const hit = findInTree(entry, fileid);
+      if (hit) return hit;
+    }
+  }
+  return undefined;
+}
+
+/** Accepts a link code, a ...?code=XYZ URL, or a short link that redirects to one. */
+async function publinkCode(link: string): Promise<string> {
+  const trimmed = link.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  const direct = new URL(trimmed).searchParams.get("code");
+  if (direct) return direct;
+  const res = await fetch(trimmed, { redirect: "follow" });
+  const code = new URL(res.url).searchParams.get("code");
+  if (!code) throw new Error("Could not find a pCloud link code in that URL");
+  return code;
+}
+
 export function createPCloudMcpServer(
   getClient: () => Promise<PCloudClient>,
   readFileMaxBytes: number
@@ -82,7 +105,7 @@ export function createPCloudMcpServer(
     {
       title: "List folder",
       description:
-        "List files and folders in pCloud. Root is folderid 0 or path /. Defaults to the account root.",
+        "List files and folders in pCloud. Root is folderid 0 or path /. Defaults to the account root. Folders other people shared with you (and you accepted) appear here too, marked shared_with_me.",
       inputSchema: {
         path: z.string().optional().describe("Folder path, e.g. /Documents"),
         folderid: z.number().int().optional().describe("Folder id. 0 is root."),
@@ -94,8 +117,7 @@ export function createPCloudMcpServer(
       run(async (client) => {
         const json = await client.call("listfolder", {
           ...folderOrPath(args),
-          recursive: args.recursive ? 1 : undefined,
-          noshares: 1
+          recursive: args.recursive ? 1 : undefined
         });
         const meta = (json.metadata || {}) as JsonMap;
         const listed = summarizeContents(meta.contents);
@@ -406,8 +428,7 @@ export function createPCloudMcpServer(
       run(async (client) => {
         const json = await client.call("listfolder", {
           ...folderOrPath(args),
-          recursive: 1,
-          noshares: 1
+          recursive: 1
         });
         const needle = args.query.toLowerCase();
         const limit = Math.min(args.max_results || 50, 200);
@@ -483,6 +504,106 @@ export function createPCloudMcpServer(
     },
     async (args) =>
       run(async (client) => client.call("deletepublink", { code: args.code }))
+  );
+
+  server.registerTool(
+    "list_shares",
+    {
+      title: "List shares",
+      description:
+        "List folder shares: invitations you received (pending requests and accepted shares) and the ones you sent. Accepted incoming shares are readable with list_folder/read_file like your own folders.",
+      annotations: { readOnlyHint: true, openWorldHint: true }
+    },
+    async () =>
+      run(async (client) => {
+        const json = await client.call("listshares");
+        return { shares: json.shares, requests: json.requests };
+      })
+  );
+
+  server.registerTool(
+    "accept_share",
+    {
+      title: "Accept share",
+      description:
+        "Accept a pending folder share invitation (sharerequestid from list_shares). The folder then appears in your pCloud, by default in the root.",
+      inputSchema: {
+        sharerequestid: z.number().int(),
+        name: z.string().optional().describe("Name for the shared folder in your pCloud"),
+        folderid: z.number().int().optional().describe("Where to place it. Default root (0).")
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true }
+    },
+    async (args) =>
+      run(async (client) => {
+        await client.call("acceptshare", {
+          sharerequestid: args.sharerequestid,
+          name: args.name,
+          folderid: args.folderid
+        });
+        return { accepted: true, sharerequestid: args.sharerequestid };
+      })
+  );
+
+  server.registerTool(
+    "read_public_link",
+    {
+      title: "Read public link",
+      description:
+        "Open a pCloud public link someone sent you (full URL or its code). A folder link lists its contents; pass fileid to read one file inside it. Text is returned inline, other files as a download URL.",
+      inputSchema: {
+        link: z.string().min(1).describe("Public link URL or code"),
+        fileid: z.number().int().optional().describe("File inside a folder link"),
+        max_bytes: z.number().int().positive().optional()
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true }
+    },
+    async (args) =>
+      run(async (client) => {
+        const code = await publinkCode(args.link);
+        const { json: shown } = await client.callPublink("showpublink", { code });
+        const root = (shown.metadata || {}) as JsonMap;
+        if (root.isfolder && args.fileid === undefined) {
+          const flat: JsonMap[] = [];
+          const walk = (node: JsonMap, prefix: string) => {
+            for (const entry of (Array.isArray(node.contents) ? node.contents : []) as JsonMap[]) {
+              flat.push(summarizeMetadata(entry, { path: `${prefix}/${entry.name}` }));
+              if (entry.isfolder) walk(entry, `${prefix}/${entry.name}`);
+            }
+          };
+          walk(root, "");
+          return {
+            folder: summarizeMetadata(root),
+            note: "Pass a fileid from this list to read that file.",
+            items: flat.slice(0, 400),
+            truncated: flat.length > 400
+          };
+        }
+        const { json: dl } = await client.callPublink("getpublinkdownload", {
+          code,
+          fileid: args.fileid
+        });
+        const hosts = dl.hosts as string[] | undefined;
+        if (!hosts?.length || !dl.path) throw new Error("pCloud did not return a download link");
+        const url = `https://${hosts[0]}${dl.path}`;
+        const meta = root.isfolder
+          ? findInTree(root, args.fileid!) ?? { fileid: args.fileid }
+          : root;
+        const summary = summarizeMetadata(meta);
+        const maxBytes = Math.min(args.max_bytes || readFileMaxBytes, 5_000_000);
+        const size = Number(summary.size || 0);
+        if (!looksText(String(summary.contenttype || ""), String(summary.name || "")) || size > maxBytes) {
+          return { ...summary, note: "Use the download URL.", download_url: url, expires: dl.expires };
+        }
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Download failed with HTTP ${res.status}`);
+        const buf = Buffer.from(await res.arrayBuffer());
+        return {
+          ...summary,
+          truncated: buf.length > maxBytes,
+          content: buf.subarray(0, maxBytes).toString("utf8")
+        };
+      })
   );
 
   server.registerTool(

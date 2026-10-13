@@ -79,6 +79,31 @@ export class PCloudClient {
     return json;
   }
 
+  /** Calls a public-link method, trying the other pCloud region if the link lives there. */
+  async callPublink(method: string, params: Record<string, string | number | undefined>): Promise<{
+    json: JsonMap;
+    hostname: string;
+  }> {
+    const hosts = [this.hostname, this.hostname === "eapi.pcloud.com" ? "api.pcloud.com" : "eapi.pcloud.com"];
+    let lastError: unknown;
+    for (const hostname of hosts) {
+      const url = new URL(`https://${hostname}/${method}`);
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
+      }
+      const res = await fetch(url);
+      if (!res.ok) {
+        lastError = new Error(`pCloud HTTP ${res.status} calling ${method}`);
+        continue;
+      }
+      const json = (await res.json()) as JsonMap;
+      const result = Number(json.result ?? 0);
+      if (result === 0) return { json, hostname };
+      lastError = new PCloudError(result, String(json.error || ""));
+    }
+    throw lastError instanceof Error ? lastError : new Error(`${method} failed`);
+  }
+
   async downloadLink(params: { fileid?: number; path?: string }): Promise<{
     url: string;
     expires?: string;
@@ -234,6 +259,9 @@ export function summarizeMetadata(meta: JsonMap, extra: JsonMap = {}): JsonMap {
     modified: meta.modified,
     ...extra
   };
+  // Folders shared with this account by someone else (and items inside them).
+  if (meta.ismine === false) out.shared_with_me = true;
+  if (meta.isshared) out.shared = true;
   if (isFolder) {
     out.folderid = meta.folderid;
   } else {
