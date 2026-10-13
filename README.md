@@ -110,6 +110,32 @@ If `CONNECTOR_PASSWORD` is unset, the server writes a random one to `data/connec
 
 `PUBLIC_URL` is also picked up from `RENDER_EXTERNAL_URL`, `RAILWAY_PUBLIC_DOMAIN`, or `FLY_APP_NAME` when those platforms set them.
 
+### Vercel
+
+The repo deploys to Vercel as is (`api/index.js` + `vercel.json`). Serverless
+instances do not share a disk, so keep state in Supabase:
+
+1. In a Supabase project, run:
+
+   ```sql
+   create table if not exists public.pcloud_mcp_state (
+     key text primary key,
+     value text not null,
+     updated_at timestamptz not null default now()
+   );
+   alter table public.pcloud_mcp_state enable row level security;
+   revoke all on public.pcloud_mcp_state from anon, authenticated;
+   ```
+
+2. Set these in the Vercel project environment:
+   - `CONNECTOR_PASSWORD` (required on Vercel)
+   - `SUPABASE_URL` and `SUPABASE_KEY` — the **secret** (service role) key;
+     the publishable key is refused by the table
+   - `KV_SECRET` (optional) — encrypts the stored token and sessions
+   - `PCLOUD_API_HOST`, and `PCLOUD_CLIENT_ID` / `PCLOUD_CLIENT_SECRET` for
+     the Connect with pCloud button
+3. Redeploy, then open `/setup`.
+
 ### Docker
 
 ```bash

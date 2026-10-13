@@ -79,6 +79,11 @@ export function loadConfig(): AppConfig {
     throw new Error(`Invalid AUTH_MODE: ${authMode}. Use oauth, bearer, or none.`);
   }
 
+  // On serverless hosts the data dir is per-instance, so a generated password
+  // would differ between instances: require it from the environment there.
+  if (process.env.VERCEL && !process.env.CONNECTOR_PASSWORD) {
+    throw new Error("Set CONNECTOR_PASSWORD in the Vercel project environment.");
+  }
   const connectorPassword =
     process.env.CONNECTOR_PASSWORD ||
     readOrCreateSecret(join(dataDir, "connector-password.txt"));
